@@ -1,20 +1,255 @@
-import subprocess
 import asyncio
+import subprocess
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Form, BackgroundTasks
 from fastapi.responses import HTMLResponse
 
 
-app = FastAPI()
+# ============================================================
+# 配置
+# ============================================================
 
+WIFI_INTERFACE = "wlan0"
+
+AP_CONNECTION_NAME = "GoodLife-AP"
+AP_SSID = "GoodLife"
+AP_PASSWORD = "12345678"
+
+wifi_switching = False
+
+# ============================================================
+# 获取 wlan0 当前连接
+# ============================================================
+
+def get_wifi_status():
+    state_result = subprocess.run(
+        [
+            "nmcli",
+            "-g",
+            "GENERAL.STATE",
+            "device",
+            "show",
+            WIFI_INTERFACE
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    connection_result = subprocess.run(
+        [
+            "nmcli",
+            "-g",
+            "GENERAL.CONNECTION",
+            "device",
+            "show",
+            WIFI_INTERFACE
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    state_text = state_result.stdout.strip()
+    connection = connection_result.stdout.strip()
+
+    try:
+        state = int(state_text.split()[0])
+    except (ValueError, IndexError):
+        state = 0
+
+    return state, connection
+
+
+# ============================================================
+# 判断 GoodLife AP 配置是否存在
+# ============================================================
+
+def goodlife_ap_exists():
+    result = subprocess.run(
+        [
+            "nmcli",
+            "-t",
+            "-f",
+            "NAME",
+            "connection",
+            "show"
+        ],
+        capture_output=True,
+        text=True
+    )
+
+    connections = result.stdout.splitlines()
+
+    return AP_CONNECTION_NAME in connections
+
+
+# ============================================================
+# 启动 GoodLife AP
+# ============================================================
+
+def start_goodlife_ap():
+    state, connection = get_wifi_status()
+
+    if state == 100 and connection == AP_CONNECTION_NAME:
+        print("GoodLife AP 已经启动")
+        return
+
+    print()
+    print("==============================")
+    print("准备启动 GoodLife AP")
+
+    if goodlife_ap_exists():
+        print("GoodLife-AP 配置已存在，直接启动")
+
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "nmcli",
+                "connection",
+                "up",
+                AP_CONNECTION_NAME
+            ],
+            capture_output=True,
+            text=True
+        )
+
+    else:
+        print("第一次创建 GoodLife AP")
+
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "nmcli",
+                "device",
+                "wifi",
+                "hotspot",
+                "ifname",
+                WIFI_INTERFACE,
+                "con-name",
+                AP_CONNECTION_NAME,
+                "ssid",
+                AP_SSID,
+                "password",
+                AP_PASSWORD
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "nmcli",
+                "connection",
+                "modify",
+                AP_CONNECTION_NAME,
+                "connection.autoconnect",
+                "no"
+            ],
+            capture_output=True,
+            text=True
+        )
+
+    print("AP stdout:")
+    print(result.stdout)
+
+    print("AP stderr:")
+    print(result.stderr)
+
+    print("AP returncode:", result.returncode)
+    print("==============================")
+
+
+# ============================================================
+# 网络持续监控
+# ============================================================
+
+async def network_watch():
+    global wifi_switching
+
+    disconnected_count = 0
+
+    print("GoodLife 网络监控启动")
+
+    while True:
+
+        # 正在进行配网切换时，不允许监控线程重新拉起 AP
+        if wifi_switching:
+            disconnected_count = 0
+            print("正在切换 WiFi，暂停 AP 兜底")
+
+            await asyncio.sleep(5)
+            continue
+
+        state, connection = get_wifi_status()
+
+        print(
+            f"wlan0 state={state}, connection={connection}"
+        )
+
+        # 已经正常连接
+        if state == 100:
+
+            disconnected_count = 0
+
+        else:
+
+            disconnected_count += 1
+
+            print(
+                "WiFi 尚未连接成功:",
+                disconnected_count,
+                "/ 3"
+            )
+
+            if disconnected_count >= 3:
+
+                print("连续 15 秒没有可用 WiFi")
+
+                start_goodlife_ap()
+
+                disconnected_count = 0
+
+        await asyncio.sleep(5)
+        
+# ============================================================
+# FastAPI 生命周期
+# ============================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(network_watch())
+
+    try:
+        yield
+    finally:
+        task.cancel()
+
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+app = FastAPI(lifespan=lifespan)
+
+
+# ============================================================
+# HTML
+# ============================================================
 
 HTML = """
 <!DOCTYPE html>
 <html>
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
 
     <title>GoodLife 配网</title>
 </head>
@@ -28,7 +263,7 @@ HTML = """
 <br><br>
 
 <select id="wifi">
-    <option>请先扫描</option>
+    <option value="">请先扫描</option>
 </select>
 
 <br><br>
@@ -49,40 +284,32 @@ HTML = """
 <script>
 
 async function scanWifi() {
+    const status = document.getElementById("status");
+    const select = document.getElementById("wifi");
 
-    document.getElementById("status").innerText =
-        "正在扫描...";
+    status.innerText = "正在扫描...";
 
     try {
-
         const response = await fetch("/api/wifi");
-
         const wifiList = await response.json();
-
-        const select =
-            document.getElementById("wifi");
 
         select.innerHTML = "";
 
         if (wifiList.length === 0) {
+            const option = document.createElement("option");
 
-            const option =
-                document.createElement("option");
-
+            option.value = "";
             option.text = "没有扫描到 WiFi";
 
             select.appendChild(option);
 
-            document.getElementById("status").innerText =
-                "没有扫描到 WiFi";
+            status.innerText = "没有扫描到 WiFi";
 
             return;
         }
 
         wifiList.forEach(wifi => {
-
-            const option =
-                document.createElement("option");
+            const option = document.createElement("option");
 
             option.value = wifi.ssid;
 
@@ -95,18 +322,18 @@ async function scanWifi() {
             select.appendChild(option);
         });
 
-        document.getElementById("status").innerText =
-            "扫描完成";
+        status.innerText = "扫描完成";
+    }
+    catch (error) {
+        console.log(error);
 
-    } catch (error) {
-
-        document.getElementById("status").innerText =
-            "扫描失败";
+        status.innerText = "扫描失败";
     }
 }
 
 
 async function connectWifi() {
+    const status = document.getElementById("status");
 
     const ssid =
         document.getElementById("wifi").value;
@@ -115,8 +342,8 @@ async function connectWifi() {
         document.getElementById("password").value;
 
     if (!ssid) {
-        document.getElementById("status").innerText =
-            "请选择 WiFi";
+        status.innerText = "请选择 WiFi";
+
         return;
     }
 
@@ -125,39 +352,37 @@ async function connectWifi() {
     form.append("ssid", ssid);
     form.append("password", password);
 
-    document.getElementById("status").innerText =
-        "正在提交连接请求...";
+    status.innerText = "正在连接...";
 
     try {
+        const response = await fetch(
+            "/api/connect",
+            {
+                method: "POST",
+                body: form
+            }
+        );
 
-        const response =
-            await fetch(
-                "/api/connect",
-                {
-                    method: "POST",
-                    body: form
-                }
-            );
+        const result = await response.json();
 
-        const result =
-            await response.json();
-
-        document.getElementById("status").innerText =
-            result.message;
-
-    } catch (error) {
-
-        document.getElementById("status").innerText =
-            "连接请求发送失败";
+        status.innerText = result.message;
+    }
+    catch (error) {
+        status.innerText = "设备正在切换 WiFi...";
     }
 }
 
 </script>
 
 </body>
+
 </html>
 """
 
+
+# ============================================================
+# 首页
+# ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
@@ -170,31 +395,27 @@ async def index():
 
 @app.get("/api/wifi")
 async def scan_wifi():
-
+    print()
     print("开始扫描 WiFi...")
 
     try:
-
         result = subprocess.run(
-        [
-        "sudo",
-        "-n",
-        "iw",
-        "dev",
-        "wlan0",
-        "scan"
-        ],
-        capture_output=True,
-        text=True,
-        timeout=15
-)
+            [
+                "sudo",
+                "-n",
+                "iw",
+                "dev",
+                WIFI_INTERFACE,
+                "scan"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15
+        )
 
     except subprocess.TimeoutExpired:
-
         print("WiFi 扫描超时")
-
         return []
-
 
     print("iw returncode:", result.returncode)
 
@@ -202,95 +423,65 @@ async def scan_wifi():
         print("iw stderr:")
         print(result.stderr)
 
+    if result.returncode != 0:
+        return []
 
-    wifi_list = []
+    wifi_map = {}
 
-    seen = set()
+    current_ssid = None
+    current_signal = -100.0
 
-    current = None
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
 
-
-    for line in result.stdout.splitlines():
-
-        line = line.strip()
-
-
-        # 出现一个新的 AP
+        # 新的 AP
         if line.startswith("BSS "):
-
-            current = {
-                "ssid": "",
-                "signal": "",
-                "security": "UNKNOWN"
-            }
-
+            current_ssid = None
+            current_signal = -100.0
             continue
-
-
-        if current is None:
-            continue
-
 
         # signal: -45.00 dBm
         if line.startswith("signal:"):
-
             parts = line.split()
 
             if len(parts) >= 2:
-                current["signal"] = parts[1]
+                try:
+                    current_signal = float(parts[1])
+                except ValueError:
+                    current_signal = -100.0
 
             continue
 
-
-        # 简单判断加密
-        if line.startswith("RSN:"):
-            current["security"] = "WPA2/WPA3"
-
-        elif line.startswith("WPA:"):
-            current["security"] = "WPA"
-
-
-        # SSID: xxxxx
+        # SSID: xxx
         if line.startswith("SSID:"):
+            current_ssid = line[5:].strip()
 
-            ssid = line[5:].strip()
-
-
-            # 隐藏 WiFi / 空 SSID
-            if not ssid:
-                current = None
+            if not current_ssid:
                 continue
 
+            # 同一个 SSID 可能有多个 AP
+            # 只保留信号最强的
+            if current_ssid not in wifi_map:
+                wifi_map[current_ssid] = current_signal
 
-            # 去重
-            if ssid in seen:
-                current = None
-                continue
+            elif current_signal > wifi_map[current_ssid]:
+                wifi_map[current_ssid] = current_signal
 
+    wifi_list = []
 
-            seen.add(ssid)
-
-            current["ssid"] = ssid
-
-
-            if not current["signal"]:
-                current["signal"] = "0"
-
-
-            wifi_list.append(current)
-
-            current = None
-
-
-    # 信号从强到弱排序
-    try:
-        wifi_list.sort(
-            key=lambda wifi: float(wifi["signal"]),
-            reverse=True
+    for ssid, signal in wifi_map.items():
+        wifi_list.append(
+            {
+                "ssid": ssid,
+                "signal": signal
+            }
         )
-    except ValueError:
-        pass
 
+    # 信号强的放前面
+    wifi_list.sort(
+        key=lambda wifi: wifi["signal"],
+        reverse=True
+    )
 
     print("扫描结果:")
 
@@ -298,78 +489,69 @@ async def scan_wifi():
         print(
             wifi["ssid"],
             wifi["signal"],
-            wifi["security"]
+            "dBm"
         )
 
-
     return wifi_list
-
-
-# ============================================================
-# 30 秒后恢复 iPhone
-# ============================================================
-
-async def rollback_wifi():
-
-    print("已启动 WiFi 回滚保护")
-
-    await asyncio.sleep(30)
-
-    print("30 秒到，尝试恢复 iPhone WiFi...")
-
-
-    result = subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "nmcli",
-            "connection",
-            "up",
-            "netplan-wlan0-iPhone"
-        ],
-        capture_output=True,
-        text=True
-    )
-
-
-    print("回滚 stdout:")
-    print(result.stdout)
-
-    print("回滚 stderr:")
-    print(result.stderr)
-
-    print("回滚 returncode:")
-    print(result.returncode)
 
 
 # ============================================================
 # 切换 WiFi
 # ============================================================
 
-async def switch_wifi(
-    ssid: str,
-    password: str
-):
+async def switch_wifi(ssid: str, password: str):
+    global wifi_switching
 
-    # 给 HTTP 响应一点时间先发出去
+    # 标记：现在正在主动切换 WiFi
+    wifi_switching = True
+
+    # 先让 HTTP 响应发给浏览器
     await asyncio.sleep(2)
-
 
     print()
     print("==============================")
-
     print(f"准备连接 WiFi: {ssid}")
 
-
-    # 启动保护任务
-    # 无论切换成功还是失败，
-    # 30 秒后都会重新连接 iPhone
-    asyncio.create_task(
-        rollback_wifi()
-    )
-
-
     try:
+
+        # --------------------------------
+        # 1. 如果当前是 GoodLife AP
+        #    先关闭 AP
+        # --------------------------------
+
+        state, connection = get_wifi_status()
+
+        if connection == AP_CONNECTION_NAME:
+
+            print("关闭 GoodLife AP...")
+
+            down_result = subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "nmcli",
+                    "connection",
+                    "down",
+                    AP_CONNECTION_NAME
+                ],
+                capture_output=True,
+                text=True
+            )
+
+            print("关闭 AP stdout:")
+            print(down_result.stdout)
+
+            print("关闭 AP stderr:")
+            print(down_result.stderr)
+
+            # 等 wlan0 从 AP 模式退出来
+            await asyncio.sleep(2)
+
+        # --------------------------------
+        # 2. 连接用户选择的 WiFi
+        # --------------------------------
+
+        print(f"开始连接目标 WiFi: {ssid}")
 
         result = subprocess.run(
             [
@@ -383,13 +565,12 @@ async def switch_wifi(
                 "password",
                 password,
                 "ifname",
-                "wlan0"
+                WIFI_INTERFACE
             ],
             capture_output=True,
             text=True,
-            timeout=20
+            timeout=25
         )
-
 
         print("连接 stdout:")
         print(result.stdout)
@@ -397,26 +578,33 @@ async def switch_wifi(
         print("连接 stderr:")
         print(result.stderr)
 
-        print("连接 returncode:")
-        print(result.returncode)
-
+        print(
+            "连接 returncode:",
+            result.returncode
+        )
 
         if result.returncode == 0:
 
-            print(f"WiFi {ssid} 连接成功")
+            print(f"{ssid} 连接成功")
 
         else:
 
-            print(f"WiFi {ssid} 连接失败")
-
+            print(f"{ssid} 连接失败")
+            print("稍后自动恢复 GoodLife AP")
 
     except subprocess.TimeoutExpired:
 
         print("连接 WiFi 超时")
+        print("稍后自动恢复 GoodLife AP")
 
+    finally:
 
-    print("==============================")
-    print()
+        # 无论成功失败，都恢复网络监控
+        wifi_switching = False
+
+        print("恢复网络监控")
+        print("==============================")
+        print()
 
 
 # ============================================================
@@ -429,15 +617,13 @@ async def connect_wifi(
     ssid: str = Form(...),
     password: str = Form(...)
 ):
-
     background_tasks.add_task(
         switch_wifi,
         ssid,
         password
     )
 
-
     return {
         "message":
-        f"正在连接 {ssid}。测试模式：30 秒后会自动恢复 iPhone WiFi。"
+            f"正在连接 {ssid}，设备网络即将切换..."
     }
