@@ -1,0 +1,5 @@
+WIFI_INTERFACE = "wlan0"
+
+AP_CONNECTION_NAME = "GoodLife-AP"
+AP_SSID = "GoodLife"
+AP_PASSWORD = "12345678"

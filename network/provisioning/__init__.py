@@ -1,0 +1,1 @@
+﻿"""GoodLife WiFi provisioning package."""
