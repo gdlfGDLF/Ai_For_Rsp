@@ -94,3 +94,7 @@ nohup python -u -m uvicorn main:app
 > goodlife.log 2>&1 &
 
 disown
+
+一些计划
+目前已经初步完成 ：
+WiFi Provisioning WiFi 配网模块
