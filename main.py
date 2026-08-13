@@ -5,9 +5,12 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from network.provisioning.monitor import network_watch
+from network.monitor import network_watch
 from network.provisioning.router import router as provisioning_router
 
+from network.provisioning.captive_portal import (
+    router as captive_router
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,3 +30,4 @@ BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 app.include_router(provisioning_router)
+
