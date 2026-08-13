@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 
 from network.state import state
 from network.wifi import scan_wifi_networks, switch_wifi
+from .captive_portal import router as captive_router
 
 router = APIRouter()
 TEMPLATE_PATH = Path(__file__).resolve().parents[2] / "templates" / "provisioning.html"
@@ -31,4 +32,6 @@ async def connect_wifi(
 
 @router.get("/api/status")
 async def get_status():
-    return state.wifi_status
+    return state.to_dict()
+
+router.include_router(captive_router)

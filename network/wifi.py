@@ -1,39 +1,33 @@
 import asyncio
 import subprocess
-from storage.config_manager import ConfigManager as ConfigManager
 
-#from .captive_portal import start_dnsmasq,stop_dnsmasq
-
-from .config import (
+from .settings import (
     WIFI_INTERFACE,
     AP_CONNECTION_NAME,
 )
-from .state import state
+from .state import state, NetworkMode
 
 from error.parser import parse_wifi_error
 
-cfg = ConfigManager("storage/device_config.json")
+
 TEMP_CONNECTION_NAME = "GoodLife-WiFi-Test"
+
 
 def decode_ssid(ssid: str):
     if "\\x" not in ssid:
         return ssid
 
     try:
-        return bytes(
-            ssid,
-            "ascii"
-        ).decode(
-            "unicode_escape"
-        ).encode(
-            "latin1"
-        ).decode(
-            "utf-8"
+        return (
+            bytes(ssid, "ascii")
+            .decode("unicode_escape")
+            .encode("latin1")
+            .decode("utf-8")
         )
-
     except Exception:
         return ssid
-        
+
+
 def get_wifi_status():
     state_result = subprocess.run(
         [
@@ -71,6 +65,7 @@ def get_wifi_status():
 
     return wifi_state, connection
 
+
 def scan_wifi_networks():
     try:
         result = subprocess.run(
@@ -80,7 +75,7 @@ def scan_wifi_networks():
                 "iw",
                 "dev",
                 WIFI_INTERFACE,
-                "scan"
+                "scan",
             ],
             capture_output=True,
             text=True,
@@ -93,48 +88,33 @@ def scan_wifi_networks():
 
     if result.returncode != 0:
         if result.stderr:
-            print(
-                "WiFi 扫描失败:",
-                result.stderr
-            )
+            print("WiFi 扫描失败:", result.stderr)
 
         return []
 
     wifi_map = {}
-
     current_signal = -100.0
 
     for raw_line in result.stdout.splitlines():
-
         line = raw_line.strip()
 
         if line.startswith("BSS "):
-
             current_signal = -100.0
 
         elif line.startswith("signal:"):
-
             try:
-                current_signal = float(
-                    line.split()[1]
-                )
-
+                current_signal = float(line.split()[1])
             except (ValueError, IndexError):
                 current_signal = -100.0
 
         elif line.startswith("SSID:"):
-
             ssid = line[5:].strip()
-
             ssid = decode_ssid(ssid)
 
             if not ssid:
                 continue
 
-            old_signal = wifi_map.get(
-                ssid,
-                -101.0
-            )
+            old_signal = wifi_map.get(ssid, -101.0)
 
             if current_signal > old_signal:
                 wifi_map[ssid] = current_signal
@@ -142,33 +122,22 @@ def scan_wifi_networks():
     wifi_list = [
         {
             "ssid": ssid,
-            "signal": signal
+            "signal": signal,
         }
         for ssid, signal in wifi_map.items()
     ]
 
     wifi_list.sort(
         key=lambda item: item["signal"],
-        reverse=True
+        reverse=True,
     )
 
     return wifi_list
 
-def create_temp_connection(ssid: str, password: str):
 
+def create_temp_connection(ssid: str, password: str):
     # 清理上一次遗留的测试连接
-    subprocess.run(
-        [
-            "sudo",
-            "-n",
-            "nmcli",
-            "connection",
-            "delete",
-            TEMP_CONNECTION_NAME,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    delete_temp_connection()
 
     # 创建临时 WiFi profile
     result = subprocess.run(
@@ -194,8 +163,7 @@ def create_temp_connection(ssid: str, password: str):
     if result.returncode != 0:
         return False, result.stderr
 
-
-    # 设置密码
+    # 设置 WiFi 密码
     result = subprocess.run(
         [
             "sudo",
@@ -216,45 +184,29 @@ def create_temp_connection(ssid: str, password: str):
     )
 
     if result.returncode != 0:
-
-        subprocess.run(
-            [
-                "sudo",
-                "-n",
-                "nmcli",
-                "connection",
-                "delete",
-                TEMP_CONNECTION_NAME,
-            ],
-            capture_output=True,
-            text=True,
-        )
-
+        delete_temp_connection()
         return False, result.stderr
 
+    return True, None
 
-    return True, TEMP_CONNECTION_NAME
 
-def connect_to_(name:str):
-    
-    result = subprocess.run(
+def connect_temp_connection():
+    return subprocess.run(
         [
             "sudo",
             "-n",
             "nmcli",
             "connection",
             "up",
-            name
+            TEMP_CONNECTION_NAME,
         ],
         capture_output=True,
         text=True,
-        timeout=30
+        timeout=30,
     )
-    
-    return result
+
 
 def delete_temp_connection():
-
     subprocess.run(
         [
             "sudo",
@@ -292,51 +244,46 @@ def restore_ap():
     return result.returncode == 0
 
 
-
-
 async def switch_wifi(ssid: str, password: str):
-
     state.wifi_switching = True
 
-    state.wifi_status = {
-        "status": "connecting",
-        "ssid": ssid,
-        "error": None,
-    }
+    # 开始新的连接流程，旧 status_info 自动清空
+    state.set_state(
+        NetworkMode.CONNECTING,
+        ssid
+    )
 
     try:
-
         # --------------------------------------------------
         # 1. 创建临时 WiFi profile
         # --------------------------------------------------
 
-        ok, info = create_temp_connection(
+        ok, error = create_temp_connection(
             ssid,
             password
         )
 
         if not ok:
-
-            state.wifi_status = {
-                "status": "failed",
-                "ssid": ssid,
-                "error": {
-                    "code": "CREATE_PROFILE_FAILED",
-                    "message": info,
-                },
+            err_info = {
+                "code": "CREATE_PROFILE_FAILED",
+                "message": error,
             }
 
+            # AP 此时还没有关闭
+            state.set_state(
+                NetworkMode.ONAP,
+                ssid,
+                err_info
+            )
             return
 
-
         # --------------------------------------------------
-        # 2. 关闭 AP
+        # 2. 关闭 GoodLife AP
         # --------------------------------------------------
 
         _, connection = get_wifi_status()
 
         if connection == AP_CONNECTION_NAME:
-
             subprocess.run(
                 [
                     "sudo",
@@ -350,25 +297,22 @@ async def switch_wifi(ssid: str, password: str):
                 text=True,
             )
 
-            # 给网卡一点切换时间
             await asyncio.sleep(1)
-
 
         # --------------------------------------------------
         # 3. 尝试连接用户 WiFi
         # --------------------------------------------------
-        result = connect_to_(ssid)
 
+        result = connect_temp_connection()
 
         # --------------------------------------------------
-        # 4. 成功
+        # 4. 连接成功
         # --------------------------------------------------
 
         if result.returncode == 0:
-
             print(f"{ssid} 连接成功")
 
-            # 测试成功，现在允许以后自动连接
+            # 测试成功，以后允许自动连接
             subprocess.run(
                 [
                     "sudo",
@@ -384,14 +328,12 @@ async def switch_wifi(ssid: str, password: str):
                 text=True,
             )
 
-            state.wifi_status = {
-                "status": "connected",
-                "ssid": ssid,
-                "error": None,
-            }
+            state.set_state(
+                NetworkMode.ONLINE,
+                ssid
+            )
 
             return
-
 
         # --------------------------------------------------
         # 5. 连接失败
@@ -406,68 +348,64 @@ async def switch_wifi(ssid: str, password: str):
             result.stderr
         )
 
-        state.wifi_status = {
-            "status": "failed",
-            "ssid": ssid,
-            "error": err_info,
-        }
-
-        # 删除错误密码对应的临时 profile
         delete_temp_connection()
 
-        # 最关键：
-        # 恢复 GoodLife AP
+        # 恢复配网 AP
         restore_ap()
 
+        # 当前已经回到 AP，同时保存刚才失败原因
+        state.set_state(
+            NetworkMode.ONAP,
+            ssid,
+            err_info
+        )
 
     # ------------------------------------------------------
-    # 6. 超时
+    # 6. 连接超时
     # ------------------------------------------------------
 
     except subprocess.TimeoutExpired:
-
         print(f"连接 {ssid} 超时")
 
-        state.wifi_status = {
-            "status": "failed",
-            "ssid": ssid,
-            "error": {
-                "code": "TIMEOUT",
-                "message": "连接超时",
-            },
+        err_info = {
+            "code": "TIMEOUT",
+            "message": "连接超时",
         }
 
         delete_temp_connection()
-
-        # 超时一样必须恢复 AP
         restore_ap()
 
+        state.set_state(
+            NetworkMode.ONAP,
+            ssid,
+            err_info
+        )
 
     # ------------------------------------------------------
-    # 7. 其它异常
+    # 7. 未知异常
     # ------------------------------------------------------
 
     except Exception as error:
-
         print(
             "WiFi切换异常:",
             error
         )
 
-        state.wifi_status = {
-            "status": "failed",
-            "ssid": ssid,
-            "error": {
-                "code": "INTERNAL_ERROR",
-                "message": str(error),
-            },
+        err_info = {
+            "code": "INTERNAL_ERROR",
+            "message": str(error),
         }
 
         delete_temp_connection()
-
         restore_ap()
 
+        state.set_state(
+            NetworkMode.ONAP,
+            ssid,
+            err_info
+        )
 
     finally:
-
+        # finally只负责解除“正在主动切网”标记
+        # 绝对不要在这里修改 NetworkMode
         state.wifi_switching = False

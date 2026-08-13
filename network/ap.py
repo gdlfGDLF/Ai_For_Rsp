@@ -1,6 +1,6 @@
 import subprocess
 
-from .config import AP_CONNECTION_NAME, AP_PASSWORD, AP_SSID, WIFI_INTERFACE
+from .settings import AP_CONNECTION_NAME, AP_PASSWORD, AP_SSID, WIFI_INTERFACE
 from .wifi import get_wifi_status
 #from .captive_portal import start_dnsmasq
 
