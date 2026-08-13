@@ -1,0 +1,10 @@
+{
+    "wifi_status": {
+        "status": "failed",
+        "ssid": "iPhone",
+        "error": {
+            "code": "UNKNOWN_ERROR",
+            "message": "WiFi 连接失败"
+        }
+    }
+}

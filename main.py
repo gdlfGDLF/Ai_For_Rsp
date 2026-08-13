@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from network.provisioning.monitor import network_watch
+from network.monitor import network_watch
 from network.provisioning.router import router as provisioning_router
 
 
