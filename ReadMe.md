@@ -1,100 +1,77 @@
 # GoodLife
 
-GoodLife 是一个运行在 Linux 设备上的 WiFi 配网页面。设备无法连接到可用 WiFi 时，会通过 NetworkManager 启动 `GoodLife` 热点；用户连接热点并访问网页后，可以扫描附近网络并提交 WiFi 密码。
+GoodLife 是一个基于 FastAPI 的 Linux 设备 Wi-Fi 配网服务。设备断网后会启动临时热点，用户通过配网页面扫描并连接目标 Wi-Fi。
 
-## 系统要求
+## 项目结构
 
-- Linux（需要 NetworkManager）
-- Python 3.10 或更高版本
-- 无线网卡接口默认名为 `wlan0`
-- 系统命令：`nmcli`、`iw`、`sudo`
-- 运行账户需要能够通过 `sudo -n` 非交互执行相关网络命令
+```text
+GoodLife/
+├── main.py                       # FastAPI 入口、静态资源挂载、网络监控生命周期
+├── network/
+│   ├── __init__.py              # 网络包标识
+│   ├── ap.py                    # GoodLife 临时热点的检测、创建和启动
+│   ├── config.py                # 网卡、热点名称、SSID 和密码等网络常量
+│   ├── monitor.py               # 后台检测联网状态，连续断网时恢复热点
+│   ├── state.py                 # 配网过程的共享运行状态
+│   ├── wifi.py                  # Wi-Fi 扫描、连接、失败回滚和配置保存
+│   └── provisioning/
+│       ├── __init__.py          # 配网 Web 子包
+│       ├── router.py            # 配网页面与 Wi-Fi API 路由
+│       └── captive_portal.py    # dnsmasq 启停支持（当前尚未接入主流程）
+├── storage/
+│   ├── config_manager.py        # JSON 设备配置的读写封装
+│   └── device_config.json       # 设备运行配置
+├── error/
+│   └── parser.py                # 将 nmcli 错误转换为前端可用错误信息
+├── templates/
+│   └── provisioning.html        # 配网页面
+├── static/
+│   ├── css/provisioning.css     # 页面样式
+│   └── js/provisioning.js       # 扫描、连接及状态轮询逻辑
+└── Config/provisioning.json     # 预留的配网配置文件
+```
 
-## 安装依赖
+## 模块边界
 
-建议使用虚拟环境：
+- `network/` 是底层网络能力，不依赖 FastAPI。
+- `network/provisioning/` 是 Web 接入层，将底层能力暴露为页面和 API。
+- `main.py` 只负责组装应用以及启动、停止后台监控任务。
+
+## 运行环境
+
+项目面向使用 NetworkManager 的 Linux 设备。依赖分为两类：
+
+- `requirements-apt.txt`：Debian/Ubuntu 系统软件，包括 `network-manager`（提供 `nmcli`）、`iw`、`iptables`、`sudo` 和 `dnsmasq`。
+- `requirements.txt`：Python 软件包，包括 FastAPI、Uvicorn 和表单解析支持。
+
+先安装系统依赖：
 
 ```bash
-python3 -m venv .venv
+sudo apt-get update
+sudo xargs -a requirements-apt.txt apt-get install -y
+sudo systemctl enable --now NetworkManager
+```
+
+其中 `dnsmasq` 和 `iptables` 用于后续 captive portal/流量转发；当前主流程尚未启用 captive portal 时，它们不是启动 FastAPI 服务的硬性依赖。
+
+建议先创建虚拟环境并安装依赖：
+
+```bash
+python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install fastapi uvicorn python-multipart
+python -m pip install -r requirements.txt
 ```
 
-## 配置
-
-网络配置位于 `network/provisioning/config.py`：
-
-```python
-WIFI_INTERFACE = "wlan0"
-AP_CONNECTION_NAME = "GoodLife-AP"
-AP_SSID = "GoodLife"
-AP_PASSWORD = "12345678"
-```
-
-部署前请修改默认热点密码。热点密码至少需要 8 个字符。
-
-## 启动
-
-在项目根目录运行：
+示例启动命令：
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-开发时如需自动重载：
+## 后续建议
 
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-然后访问：
-
-```text
-http://设备IP:8000/
-```
-
-## 工作流程
-
-1. 应用启动时创建网络监控任务。
-2. 监控任务每 5 秒检查一次 `wlan0`。
-3. 连续三次未连接时，应用创建或启动 `GoodLife-AP`。
-4. 用户打开配网页面并扫描附近 WiFi。
-5. 用户提交 SSID 和密码后，设备关闭热点并连接目标 WiFi。
-6. 切换期间暂停热点自动恢复；切换结束后恢复网络监控。
-
-## 接口
-
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| `GET` | `/` | 返回配网页面 |
-| `GET` | `/api/wifi` | 扫描并返回附近 WiFi |
-| `POST` | `/api/connect` | 提交 `ssid` 和 `password`，后台切换网络 |
-| `GET` | `/static/*` | 前端静态资源 |
-
-## 常见问题
-
-- 扫描结果为空：确认 `iw dev wlan0 scan` 可以正常执行，并检查无线接口名称。
-- 无法启动热点：检查 `nmcli`、NetworkManager 和 `sudo -n` 权限。
-- POST 接口启动时报错：确认已安装 `python-multipart`。
-- 页面能打开但脚本加载失败：必须从项目根目录启动；当前代码也会使用项目绝对路径定位静态文件。
-
-## 安全提示
-
-- 不要在日志中输出用户提交的 WiFi 密码。
-- 部署时修改默认热点密码。
-- `sudoers` 仅授权应用实际需要的 `nmcli` 和 `iw` 命令，不要授予无范围限制的 sudo 权限。
-
-cd ~/GoodLife 
-source .venv/bin/activate
-
-nohup python -u -m uvicorn main:app
---host 0.0.0.0
---port 8000
-> goodlife.log 2>&1 &
-
-disown
-
-一些计划
-目前已经初步完成 ：
-WiFi Provisioning WiFi 配网模块
+1. 将热点密码等环境相关配置移至环境变量或独立配置文件，避免写死在源码中。
+2. 用 `logging` 替代 `print`，并统一处理子进程失败和超时。
+3. 为外部命令增加一层适配器，以便在非 Linux 环境中编写单元测试。
+4. 明确 `captive_portal.py` 是否启用；若长期不用，可删除以免产生错误预期。
+5. 补充锁或状态管理机制，避免监控任务与用户发起的 Wi-Fi 切换同时操作 NetworkManager。
